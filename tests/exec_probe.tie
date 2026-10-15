@@ -1,0 +1,182 @@
+type tie<logic>
+// exec_probe.tie —— 执行域引擎验收探针（Windows 主机）
+// ============================================================
+// 覆盖：run（PATH 解析 / rc / cwd 直启 / 启动失败不静默）、capture（中文投喂往返）、
+//       redir（覆盖 / 追加 / stderr 文件 / 2->stdout 合流）、pipe2（进程管道 / rc 传递）、
+//       chain（&& / || / ; / 跳过传播 / 管道单元）。
+// 运行：cd tie-repo/tiej && tests/exec_probe.exe（cwd 保持 tiej 根，临时文件落此）。
+import "../src/core/execrun.tie"
+
+var g_pass: i64 = 0
+var g_fail: i64 = 0
+
+func check(cond: bool, tag: string) {
+    if cond {
+        g_pass = g_pass + 1
+        println("PASS " + tag)
+    } else {
+        g_fail = g_fail + 1
+        println("FAIL " + tag)
+    }
+}
+
+// 字节级 contains（不依赖 str_contains 系）。
+func has(s: string, sub: string) -> bool {
+    var n = len(s)
+    var m = len(sub)
+    if m == 0 {
+        return true
+    }
+    if m > n {
+        return false
+    }
+    var i: i64 = 0
+    while i <= n - m {
+        var j: i64 = 0
+        var hit = true
+        while j < m {
+            if str_byte(s, i + j) != str_byte(sub, j) {
+                hit = false
+                break
+            }
+            j = j + 1
+        }
+        if hit {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func mseg(words: table<string>, cwd: string) -> Seg {
+    var s = Seg()
+    s.words = words
+    s.cwd = cwd
+    return s
+}
+
+// 路径在运行时由 cwd() 推导（避免任何本机绝对路径入库）：
+// 期望从本仓根运行（cwd = …/tiej）；TIEC = 兄弟仓 tiec（git 仓）；UP2 = 上两级（非仓）。
+var BASE: string = ""
+
+func main() {
+    BASE = cwd()
+    var TIEC = BASE + "/../tiec"
+    var UP2 = BASE + "/../.."
+    // ---- 1. run：PATH 解析 + rc ----
+    check(execrun.run(["git", "--version"], "") == 0, "1.1 run git --version rc=0")
+
+    // ---- 2. 启动失败不静默 ----
+    var rc2 = execrun.run(["definitely_no_such_cmd_xyz_12345"], "")
+    check(rc2 == -1, "2.1 run 不存在命令 → rc=-1")
+    var r2 = execrun.capture(["definitely_no_such_cmd_xyz_12345"], "", "")
+    check(!r2.started && r2.rc == -1, "2.2 capture 不存在命令 → started=false")
+
+    // ---- 3. capture 输出回收 ----
+    var r3 = execrun.capture(["git", "--version"], "", "")
+    check(r3.started && r3.rc == 0, "3.1 capture rc=0")
+    check(has(r3.out, "git version"), "3.2 capture 输出含 'git version'")
+
+    // ---- 4. cwd 直启（lpCurrentDirectory；不拼 cd 前缀） ----
+    var r4a = execrun.capture(["git", "rev-parse", "--is-inside-work-tree"], TIEC, "")
+    check(r4a.rc == 0 && has(r4a.out, "true"), "4.1 cwd=tie 仓：rev-parse 成功")
+    var r4b = execrun.capture(["git", "rev-parse", "--is-inside-work-tree"], UP2, "")
+    check(r4b.rc != 0, "4.2 cwd=非仓：rc != 0（cwd 真生效）")
+
+    // ---- 5. 投喂 + 中文往返 ----
+    var r5 = execrun.capture(["findstr", "."], "", "你好，世界\nsecond line\n")
+    check(r5.rc == 0 && has(r5.out, "你好，世界"), "5.1 中文投喂→回显（UTF-8 往返）")
+
+    // ---- 6. pipe2：进程管道 + rc 传递 ----
+    var (pa, pb) = execrun.pipe2(["git", "log", "--oneline", "-5"], ["findstr", "."], TIEC)
+    check(pa.rc == 0 && pb.rc == 0 && len(pb.out) > 0, "6.1 pipe2 git log → findstr 有输出")
+    var (pc, pd) = execrun.pipe2(["git", "log", "--oneline", "-5"], ["findstr", "zzz_no_such"], TIEC)
+    check(pd.rc == 1 && len(pd.out) == 0, "6.2 findstr 无匹配 rc=1（rc 传递）")
+
+    // ---- 6b. 三段管道（中间段接线）----
+    var t6: table<string> = []
+    var t6a = mseg(["git", "log", "--oneline", "-8"], TIEC)
+    var t6b = mseg(["findstr", "."], TIEC)
+    var t6c = mseg(["findstr", "."], TIEC)
+    t6c.cap_out = true
+    table_push(t6, execrun.enc(t6a))
+    table_push(t6, execrun.enc(t6b))
+    table_push(t6, execrun.enc(t6c))
+    var r6 = execrun.run_pipeline(t6)
+    var r6c = execrun.res_decode(r6[2])
+    check(len(r6) == 3 && r6c.rc == 0 && len(r6c.out) > 0, "6.3 三段管道 git log → findstr → findstr 有输出")
+
+    // ---- 7. redir：覆盖 / 追加 / stderr / 合流 ----
+    var f1 = "exec_probe_t7.txt"
+    var r7 = execrun.redir(["git", "log", "--oneline", "-3"], TIEC, f1, false, "", false)
+    check(r7.rc == 0, "7.1 redir 覆盖 rc=0")
+    var c7 = file_read(f1)
+    check(len(c7) > 0, "7.2 重定向文件非空")
+    var r7b = execrun.redir(["git", "log", "--oneline", "-6"], TIEC, f1, true, "", false)
+    var c7b = file_read(f1)
+    check(len(c7b) > len(c7), "7.3 ->> 追加（内容变长）")
+    var r7c = execrun.redir(["git", "rev-parse", "--verify", "nosuchref_xyz"], TIEC, "", false, "exec_probe_t7e.txt", false)
+    check(r7c.rc != 0, "7.4 rev-parse 失败 rc != 0")
+    var c7e = file_read("exec_probe_t7e.txt")
+    check(len(c7e) > 0, "7.5 stderr 重定向文件非空")
+    var sg7 = Seg()
+    sg7.words = ["git", "rev-parse", "--verify", "nosuchref_xyz"]
+    sg7.cwd = TIEC
+    sg7.cap_out = true
+    sg7.err_merge = true
+    var r7m = execrun.run_one(sg7)
+    check(r7m.rc != 0 && has(r7m.out, "fatal"), "7.6 2->stdout 合流（stderr 入 out）")
+
+    // ---- 8. chain：&& / || / ; / 跳过传播 / 管道单元 ----
+    var s8: table<string> = []
+    table_push(s8, execrun.enc(mseg(["git", "--version"], "")))
+    table_push(s8, execrun.enc(mseg(["git", "--version"], "")))
+    table_push(s8, execrun.enc(mseg(["definitely_no_such_cmd_xyz_12345"], "")))
+    table_push(s8, execrun.enc(mseg(["git", "--version"], "")))
+    table_push(s8, execrun.enc(mseg(["git", "--version"], "")))
+    var j8: table<i64> = [0, 1, 1, 2, 3]
+    // 语义：ok && ok && fail || ok ; ok
+    var c8 = execrun.chain(s8, j8)
+    check(len(c8) == 5, "8.1 chain 结果条数")
+    var e0 = execrun.res_decode(c8[0])
+    var e1 = execrun.res_decode(c8[1])
+    var e2 = execrun.res_decode(c8[2])
+    var e3 = execrun.res_decode(c8[3])
+    var e4 = execrun.res_decode(c8[4])
+    check(e0.started && e0.rc == 0, "8.2 段1 运行 rc=0")
+    check(e1.started && e1.rc == 0, "8.3 段2 运行 rc=0（&&）")
+    check(!e2.started && e2.rc == -1, "8.4 段3 启动失败 rc=-1")
+    check(e3.started && e3.rc == 0, "8.5 段4 运行 rc=0（|| 接失败）")
+    check(e4.started && e4.rc == 0, "8.6 段5 运行 rc=0（; 恒跑）")
+    // 跳过传播：fail && skip
+    var s8b: table<string> = []
+    table_push(s8b, execrun.enc(mseg(["definitely_no_such_cmd_xyz_12345"], "")))
+    table_push(s8b, execrun.enc(mseg(["git", "--version"], "")))
+    var j8b: table<i64> = [0, 1]
+    var c8b = execrun.chain(s8b, j8b)
+    var eb1 = execrun.res_decode(c8b[1])
+    check(eb1.skipped, "8.7 && 前段失败 → 后段 skipped")
+    // 管道单元：git log -> findstr "." ; git --version
+    var s8c: table<string> = []
+    var g1 = mseg(["git", "log", "--oneline", "-3"], TIEC)
+    var g2 = mseg(["findstr", "."], TIEC)
+    g2.cap_out = true
+    table_push(s8c, execrun.enc(g1))
+    table_push(s8c, execrun.enc(g2))
+    table_push(s8c, execrun.enc(mseg(["git", "--version"], "")))
+    var j8c: table<i64> = [0, 4, 3]
+    var c8c = execrun.chain(s8c, j8c)
+    var ec1 = execrun.res_decode(c8c[1])
+    var ec2 = execrun.res_decode(c8c[2])
+    check(len(c8c) == 3 && ec1.rc == 0 && len(ec1.out) > 0, "8.8 管道单元（-> 语义）有输出")
+    check(ec2.rc == 0, "8.9 管道单元后 ; 续跑")
+
+    // ---- 汇总 ----
+    println("SUMMARY PASS=" + to_string(g_pass) + " FAIL=" + to_string(g_fail))
+    file_delete("exec_probe_t7.txt")
+    file_delete("exec_probe_t7e.txt")
+    if g_fail > 0 {
+        exit(1)
+    }
+}
