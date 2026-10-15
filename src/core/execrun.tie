@@ -19,7 +19,8 @@ type tie<class, unsafe:mem>
 //     场景存在阻塞风险（单流捕获 / 直通不受影响）；
 //   - 投喂（feed）为顺序写：超大输入 + 超大输出组合同理；
 //   - 启动失败 = started=false + rc=-1（消除静默吞错；诊断由调用方按 words 渲染）。
-// 待办（POSIX 批次）：chdir / execv 需在 tiec is_libc_sym 白名单登记。
+// 符号登记（已落，tiec 2026-10-15）：POSIX 侧 chdir / execv / pipe2 / _exit 已在
+// is_libc_sym 白名单（Windows 侧 GetConsoleMode 等此前已登记）。
 // 布局：extern 与数据类型在本文件顶部（namespace 外）；平台块以 #cfg 裁剪。
 //
 // 调用（示意）：
@@ -71,13 +72,64 @@ unsafe extern fn WaitForSingleObject(hHandle: i64, dwMilliseconds: u32) -> u32;
 unsafe extern fn GetExitCodeProcess(hProcess: i64, lpExitCode: ptr<u32>) -> i32;
 unsafe extern fn CloseHandle(hObject: i64) -> i32;
 unsafe extern fn GetStdHandle(nStdHandle: i32) -> ptr<u8>;
+#else
+// ==================== POSIX 符号（libc） ====================
+unsafe extern fn fork() -> i32;
+unsafe extern fn pipe2(pipefd: ptr<u8>, flags: i32) -> i32;
+unsafe extern fn dup2(oldfd: i32, newfd: i32) -> i32;
+unsafe extern fn execv(path: ptr<u8>, argv: ptr<u8>) -> i32;
+unsafe extern fn chdir(path: string) -> i32;
+unsafe extern fn waitpid(pid: i32, status: ptr<u32>, options: i32) -> i32;
+unsafe extern fn read(fd: i32, buf: ptr<u8>, count: i64) -> i64;
+unsafe extern fn write(fd: i32, buf: ptr<u8>, count: i64) -> i64;
+unsafe extern fn open(path: string, flags: i32, mode: i32) -> i32;
+unsafe extern fn close(fd: i32) -> i32;
+unsafe extern fn access(path: string, mode: i32) -> i32;
+unsafe extern fn getenv(name: string) -> ptr<u8>;
+unsafe extern fn _exit(ec: i32);
 #end
 
 namespace execrun {
 
-// ==================== 平台原语（win32 实现；POSIX 实现随平台批次补入） ====================
+// ==================== 公共：小端整数读写（两平台共用） ====================
 
-// ---- 内部：宽串/缓冲/读写辅助（自包含，参照 sys/win32.tie 范式） ----
+unsafe fn wr_u32(p: ptr<u8>, off: i64, v: i64) {
+    deref_write(ptr_add(p, off), to_u8(v & 0xFF))
+    deref_write(ptr_add(p, off + 1), to_u8((v >> 8) & 0xFF))
+    deref_write(ptr_add(p, off + 2), to_u8((v >> 16) & 0xFF))
+    deref_write(ptr_add(p, off + 3), to_u8((v >> 24) & 0xFF))
+}
+
+unsafe fn rd_u32(p: ptr<u8>, off: i64) -> i64 {
+    return to_i64(deref(ptr_add(p, off))) |
+        (to_i64(deref(ptr_add(p, off + 1))) << 8) |
+        (to_i64(deref(ptr_add(p, off + 2))) << 16) |
+        (to_i64(deref(ptr_add(p, off + 3))) << 24)
+}
+
+unsafe fn rd_u64(p: ptr<u8>, off: i64) -> i64 {
+    var v: i64 = 0
+    var k: i64 = 0
+    while k < 8 {
+        v = v | (to_i64(deref(ptr_add(p, off + k))) << (8 * k))
+        k = k + 1
+    }
+    return v
+}
+
+unsafe fn wr_u64(p: ptr<u8>, off: i64, v: i64) {
+    var k: i64 = 0
+    while k < 8 {
+        deref_write(ptr_add(p, off + k), to_u8((v >> (8 * k)) & 0xFF))
+        k = k + 1
+    }
+}
+
+#cfg(os=windows)
+// ==================== Windows 平台实现 ====================
+// （宽串 / 句柄 / 管道 / 文件 / 读写 / 等待 / 命令行引号 / 启动）
+
+// ---- 内部：宽串/缓冲（自包含，参照 sys/win32.tie 范式） ----
 
 // tie 字符串 → alloc 的 UTF-16LE C 串（含尾双 0）。
 unsafe fn wstr(s: string) -> ptr<u8> {
@@ -117,32 +169,6 @@ unsafe fn zalloc(n: i64) -> ptr<u8> {
         i = i + 1
     }
     return p
-}
-
-// 小端 u32 写 / 读。
-unsafe fn wr_u32(p: ptr<u8>, off: i64, v: i64) {
-    deref_write(ptr_add(p, off), to_u8(v & 0xFF))
-    deref_write(ptr_add(p, off + 1), to_u8((v >> 8) & 0xFF))
-    deref_write(ptr_add(p, off + 2), to_u8((v >> 16) & 0xFF))
-    deref_write(ptr_add(p, off + 3), to_u8((v >> 24) & 0xFF))
-}
-
-unsafe fn rd_u64(p: ptr<u8>, off: i64) -> i64 {
-    var v: i64 = 0
-    var k: i64 = 0
-    while k < 8 {
-        v = v | (to_i64(deref(ptr_add(p, off + k))) << (8 * k))
-        k = k + 1
-    }
-    return v
-}
-
-unsafe fn wr_u64(p: ptr<u8>, off: i64, v: i64) {
-    var k: i64 = 0
-    while k < 8 {
-        deref_write(ptr_add(p, off + k), to_u8((v >> (8 * k)) & 0xFF))
-        k = k + 1
-    }
 }
 
 // ---- 句柄/管道/文件原语 ----
@@ -421,6 +447,249 @@ unsafe fn x_spawn(words: table<string>, cwd: string, hin: i64, hout: i64, herr: 
     CloseHandle(ht1)
     return (true, hp1)
 }
+#else
+// ==================== POSIX 平台实现（linux 目标） ====================
+// 无 shell 借用：fork + chdir + dup2 + execv；PATH 检索在用户态完成（access X_OK）。
+// fd 卫生：管道一律 pipe2(O_CLOEXEC) 创建（dup2 目标自动清 CLOEXEC）——子进程 exec
+// 时其余端点自动关闭，杜绝跨子进程端点泄漏（对齐 Win 侧「即时继承位」纪律）。
+
+unsafe fn x_close(h: i64) {
+    if h > 2 {
+        close(to_i32(h))
+    }
+}
+
+// 继承位：POSIX 无对应机制（dup2 在子进程内显式接线）——空实现（对齐 Win 调用面）。
+unsafe fn x_inh(h: i64) {
+}
+
+unsafe fn x_uninh(h: i64) {
+}
+
+// 管道（两端 O_CLOEXEC）→ (读端, 写端)。失败 (0, 0)。
+unsafe fn x_pipe() -> (i64, i64) {
+    var buf = alloc(8)
+    var ok = pipe2(buf, to_i32(0x80000))  // O_CLOEXEC
+    if ok != 0 {
+        return (0, 0)
+    }
+    return (rd_u32(buf, 0), rd_u32(buf, 4))
+}
+
+// 打开输出文件（O_CLOEXEC）。append=true 追加。失败 0。
+unsafe fn x_open_write(path: string, append: bool) -> i64 {
+    var flags: i64 = 0x80241  // O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC
+    if append {
+        flags = 0x80441  // O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC
+    }
+    var h = open(path, to_i32(flags), to_i32(0x1A4))  // 0644
+    if h < 0 {
+        return 0
+    }
+    return h
+}
+
+// 打开输入文件（只读，O_CLOEXEC）。失败 0。
+unsafe fn x_open_read(path: string) -> i64 {
+    var h = open(path, to_i32(0x80000), to_i32(0))  // O_RDONLY|O_CLOEXEC（mode 忽略）
+    if h < 0 {
+        return 0
+    }
+    return h
+}
+
+// 阻塞读到 EOF → 字符串（字节级；UTF-8 原样）。
+unsafe fn x_read_all(h: i64) -> string {
+    var sb = string_builder()
+    if h <= 0 {
+        return sb_build(sb)
+    }
+    var buf = alloc(8192)
+    while true {
+        var n = read(to_i32(h), buf, 8192)
+        if n <= 0 {
+            break
+        }
+        var i: i64 = 0
+        while i < n {
+            sb_append_byte(sb, to_i64(deref(ptr_add(buf, i))))
+            i = i + 1
+        }
+    }
+    return sb_build(sb)
+}
+
+// 全量写（循环直至写完；部分写重试）。返回是否全部写出。
+unsafe fn x_write_all(h: i64, s: string) -> bool {
+    if h <= 0 {
+        return false
+    }
+    var n = len(s)
+    if n == 0 {
+        return true
+    }
+    var p = alloc(n + 1)
+    var off: i64 = 0
+    while off < n {
+        var rem = n - off
+        var j: i64 = 0
+        while j < rem {
+            deref_write(ptr_add(p, j), to_u8(str_byte(s, off + j)))
+            j = j + 1
+        }
+        var w = write(to_i32(h), p, rem)
+        if w <= 0 {
+            return false
+        }
+        off = off + w
+    }
+    return true
+}
+
+// 等待子进程（waitpid）并解码退出码。非正常退出（信号）失败 -1。
+unsafe fn x_wait(h: i64) -> i64 {
+    if h <= 0 {
+        return -1
+    }
+    var st: u32 = to_u32(0)
+    var rc = waitpid(to_i32(h), addr_of(st), to_i32(0))
+    if rc < 0 {
+        return -1
+    }
+    var sv = to_i64(st)
+    if (sv & 0x7F) != 0 {
+        return -1
+    }
+    return (sv >> 8) & 0xFF
+}
+
+// 命令解析：含 '/' 直接用；否则沿 PATH 检索（access X_OK；字节级切分）。
+unsafe fn resolve_cmd(w0: string) -> string {
+    if len(w0) == 0 {
+        return ""
+    }
+    var has_slash = false
+    var z: i64 = 0
+    var zn = len(w0)
+    while z < zn {
+        if str_byte(w0, z) == 47 {  // '/'
+            has_slash = true
+        }
+        z = z + 1
+    }
+    if has_slash {
+        return w0
+    }
+    var pp = getenv("PATH")
+    if ptr_to_int(pp) == 0 {
+        return ""
+    }
+    var pth = cstr_read(pp)
+    var n = len(pth)
+    var sb = string_builder()
+    var i: i64 = 0
+    while i <= n {
+        if i == n || str_byte(pth, i) == 58 {  // ':' 或结尾
+            var seg = sb_build(sb)
+            if len(seg) > 0 {
+                var cand = seg + "/" + w0
+                if access(cand, to_i32(1)) == 0 {  // X_OK
+                    return cand
+                }
+            }
+            sb = string_builder()
+        } else {
+            sb_append_byte(sb, str_byte(pth, i))
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// C 串（ptr）→ tie 字符串（读至 NUL）。
+unsafe fn cstr_read(p: ptr<u8>) -> string {
+    var sb = string_builder()
+    var i: i64 = 0
+    while true {
+        var b = to_i64(deref(ptr_add(p, i)))
+        if b == 0 {
+            break
+        }
+        sb_append_byte(sb, b)
+        i = i + 1
+    }
+    return sb_build(sb)
+}
+
+// 直启一个进程（fork + dup2 接线 + chdir + execv）。语义与 Win 侧一致。
+unsafe fn x_spawn(words: table<string>, cwd: string, hin: i64, hout: i64, herr: i64, use_h: bool) -> (bool, i64) {
+    var w0 = words[0]
+    var path = resolve_cmd(w0)
+    if str_len(path) == 0 {
+        return (false, 0)
+    }
+    // argv：每词 UTF-8 字节 + NUL；指针数组 + 尾 NULL
+    var nw = len(words)
+    var argv = alloc((nw + 1) * 8)
+    var k: i64 = 0
+    while k < nw {
+        var w = words[k]
+        var wl = len(w)
+        var b = alloc(wl + 1)
+        var j: i64 = 0
+        while j < wl {
+            deref_write(ptr_add(b, j), to_u8(str_byte(w, j)))
+            j = j + 1
+        }
+        deref_write(ptr_add(b, wl), to_u8(0))
+        wr_u64(argv, k * 8, ptr_to_int(b))
+        k = k + 1
+    }
+    wr_u64(argv, nw * 8, 0)
+    var pc = alloc(len(path) + 1)
+    var z: i64 = 0
+    while z < len(path) {
+        deref_write(ptr_add(pc, z), to_u8(str_byte(path, z)))
+        z = z + 1
+    }
+    deref_write(ptr_add(pc, len(path)), to_u8(0))
+    var pid = fork()
+    if pid == 0 {
+        // 子进程：cwd → 句柄接线 → exec
+        if str_len(cwd) > 0 {
+            var cr = chdir(cwd)
+            if cr != 0 {
+                _exit(to_i32(127))
+            }
+        }
+        if use_h {
+            if hin != -1 {
+                var t1 = hin
+                if t1 == -3 {
+                    t1 = 1
+                }
+                dup2(to_i32(t1), to_i32(0))
+            }
+            if hout != -1 {
+                dup2(to_i32(hout), to_i32(1))
+            }
+            if herr != -1 {
+                var t3 = herr
+                if t3 == -3 {
+                    t3 = 1
+                }
+                dup2(to_i32(t3), to_i32(2))
+            }
+        }
+        execv(pc, argv)
+        _exit(to_i32(127))
+    }
+    if pid < 0 {
+        return (false, 0)
+    }
+    return (true, to_i64(pid))
+}
+#end
 
 // ==================== 公共组合面 ====================
 
