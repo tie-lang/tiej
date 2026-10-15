@@ -19,3 +19,5 @@ Thumbs.db
 
 # 编译器伴生调试件（构建物）
 *.sym.zd
+# tpkg 规范
+target/
