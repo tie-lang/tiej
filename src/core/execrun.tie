@@ -54,6 +54,8 @@ struct Res {
     var skipped: bool = false   // &&/|| 链中因前段 rc 被跳过
 }
 
+unsafe extern fn fflush(stream: i64) -> i32;
+
 #cfg(os=windows)
 // ==================== Win32 符号（kernel32，链接默认解析） ====================
 unsafe extern fn CreateProcessW(lpApplicationName: ptr<u8>, lpCommandLine: ptr<u8>,
@@ -387,6 +389,7 @@ func build_cmdline(words: table<string>) -> string {
 // 返回 (ok, hProcess)。句柄继承位由本函数在 spawn 前瞬时置位、随后清除。
 unsafe fn x_spawn(words: table<string>, cwd: string, hin: i64, hout: i64, herr: i64, use_h: bool) -> (bool, i64) {
     var cl = build_cmdline(words)
+    var _fl = fflush(0)
     var wcl = wstr(cl)
     var wcwd: ptr<u8> = int_to_ptr(0)
     if str_len(cwd) > 0 {
@@ -653,6 +656,7 @@ unsafe fn x_spawn(words: table<string>, cwd: string, hin: i64, hout: i64, herr: 
         z = z + 1
     }
     deref_write(ptr_add(pc, len(path)), to_u8(0))
+    var _fl2 = fflush(0)
     var pid = fork()
     if pid == 0 {
         // 子进程：cwd → 句柄接线 → exec
@@ -868,11 +872,11 @@ pub func redir(words: table<string>, cwd: string, out_file: string, append: bool
 //   | cwd | in_file | out_file | err_file | feed
 // 调用方构建 Seg（类型化）后经 enc() 编码；引擎内部解码使用。
 
-func enc_field(s: string) -> string {
+pub func enc_field(s: string) -> string {
     return to_string(len(s)) + ":" + s
 }
 
-func enc_flag(b: bool) -> string {
+pub func enc_flag(b: bool) -> string {
     if b {
         return "1"
     }
@@ -900,7 +904,7 @@ pub func enc(sg: Seg) -> string {
 }
 
 // 取一个长度前缀字段 → (字段, 新游标)。
-func fld(encs: string, pos: i64) -> (string, i64) {
+pub func fld(encs: string, pos: i64) -> (string, i64) {
     var i = pos
     var n = len(encs)
     var digs = ""
@@ -919,7 +923,7 @@ func fld(encs: string, pos: i64) -> (string, i64) {
     return (sb_build(sb), i + ln)
 }
 
-func fld_flag(f: string) -> bool {
+pub func fld_flag(f: string) -> bool {
     if len(f) > 0 && str_byte(f, 0) == 49 {
         return true
     }
