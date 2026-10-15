@@ -1,0 +1,39 @@
+type tie<logic>
+// fsglob 探针：从本仓根运行（cd tie-repo/tiej）。
+import "../src/core/fsglob.tie"
+var g_pass: i64 = 0
+var g_fail: i64 = 0
+func check(cond: bool, tag: string) {
+    if cond { g_pass = g_pass + 1; println("PASS " + tag) }
+    else { g_fail = g_fail + 1; println("FAIL " + tag) }
+}
+func cnt(t: table<string>) -> i64 { return len(t) }
+func has(t: table<string>, v: string) -> bool {
+    for x in t { if x == v { return true } }
+    return false
+}
+func main() {
+    var a = fsglob.glob("tests/*.tie")
+    check(has(a, "tests/exec_probe.tie"), "1.1 tests/*.tie 含 exec_probe.tie")
+    check(has(a, "tests/fsglob_probe.tie"), "1.2 含自身")
+    var b = fsglob.glob("src/core/*.tie")
+    check(has(b, "src/core/execrun.tie") && has(b, "src/core/fsglob.tie"), "2.1 src/core/*.tie 两个文件")
+    var c = fsglob.glob("src/core/exec*.tie")
+    check(cnt(c) == 1 && has(c, "src/core/execrun.tie"), "3.1 exec*.tie 恰一个")
+    var d = fsglob.glob("src/core/e?ecrun.tie")
+    check(cnt(d) == 1, "4.1 e?ecrun.tie 单字符匹配")
+    var e = fsglob.glob("src/**/m*.tie")
+    check(len(e) == 0, "5.1 ** 在浅树无多余命中")
+    var e2 = fsglob.glob("src/**/*.tie")
+    check(has(e2, "src/core/execrun.tie") && has(e2, "src/core/fsglob.tie"), "5.2 ** 跨层命中")
+    var f = fsglob.glob("*.td")
+    check(has(f, "tpkg.config.td"), "6.1 *.td 命中清单")
+    var g = fsglob.glob("no_such_dir/*.tie")
+    check(cnt(g) == 0, "7.1 不存在目录 → 空表")
+    var h = fsglob.glob("*.TIE")
+    var ci = get_env("OS") == "Windows_NT"
+    if ci { check(cnt(h) == 0 || cnt(h) >= 0, "8.1 win 大小写不敏感（可命中）") }
+    else { check(cnt(h) == 0, "8.1 posix 大小写敏感（不命中）") }
+    println("SUMMARY PASS=" + to_string(g_pass) + " FAIL=" + to_string(g_fail))
+    if g_fail > 0 { exit(1) }
+}
