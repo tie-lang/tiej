@@ -22,11 +22,15 @@ JIT / 内嵌 LLVM 后续批次。
 - **已知限制**（登记）：双流捕获顺序读、投喂顺序写——极端双饱和场景存在阻塞  
   风险，后续批次以并发治理。
 
-测试：从本仓根运行
+测试：从本仓根运行（产物统一 `_local_only/bin/`，不进源码树）
 
 ```
-tiec tests/exec_probe.tie -o tests/exec_probe.exe && tests/exec_probe.exe
+mkdir -p _local_only/bin
+tiec tests/exec_probe.tie -o _local_only/bin/exec_probe.exe && _local_only/bin/exec_probe.exe
+tiec tests/fsglob_probe.tie -o _local_only/bin/fsglob_probe.exe && _local_only/bin/fsglob_probe.exe
+tiec tests/term_probe.tie -o _local_only/bin/term_probe.exe && _local_only/bin/term_probe.exe
 ```
 
-（26 项：PATH/rc/cwd/中文 UTF-8 往返/管道/重定向/合流/复合链/跳过传播。）
+（exec 26 项：PATH/rc/cwd/中文 UTF-8 往返/管道/重定向/合流/复合链/跳过传播；
+fsglob 10 项；term 4 项（非 TTY 降级面）。）
 
