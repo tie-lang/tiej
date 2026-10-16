@@ -1,0 +1,88 @@
+name: linux-verify
+
+# POSIX 运行级验证（tiej 运行时模块）：本机无 Linux，复刻 tie-main linux-r16（2026.1）
+# 的双 job 通道——windows 侧用 tie-main 入库 stage0 tiec.exe 交叉生成 linux 目标 IR
+# （零 Win32 call 门禁），ubuntu 侧 clang 链接出 tiec-linux，编译并运行三个探针
+# （exec / fsglob / term）。产物全部落 _local_only/bin（不入源码树）。
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  gen-linux-ir:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout tie-main (stage0 tiec.exe + driver sources)
+        uses: actions/checkout@v4
+        with:
+          repository: tie-lang/tie-main
+          path: tie-main
+
+      - name: Generate Linux-target compiler IR (stage0 tiec.exe)
+        shell: pwsh
+        run: |
+          cd tie-main
+          .\compiler\tiec.exe compiler\driver.tie --target linux-x64 --emit-ir -o driver-linux
+          Get-Item driver-linux.ll | Select-Object Length
+
+      - name: Sanity - zero Win32 calls in the Linux-target IR
+        shell: pwsh
+        run: |
+          $ll = Get-Content tie-main/driver-linux.ll -Raw
+          $w = ([regex]::Matches($ll, 'call[^\n]*@(CreateProcessW|ReadFile|WriteFile|CreateFileW|closesocket|WSAStartup|GetProcAddress|CreateThread)\(')).Count
+          Write-Host "W32_CALLS=$w"
+          if ($w -gt 0) { throw "Linux-target IR still contains Win32 calls" }
+
+      - name: Upload IR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: driver-linux-ll
+          path: tie-main/driver-linux.ll
+
+  linux-probe:
+    needs: gen-linux-ir
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tiej (probes)
+        uses: actions/checkout@v4
+
+      - name: Install LLVM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libc6-dev
+          clang --version | head -1
+
+      - name: Fetch trm_lite_linux.a
+        run: |
+          git clone --depth 1 https://github.com/tie-lang/trm-lite.git ../trm-lite
+          ls -la ../trm-lite/trm_lite_linux.a
+
+      - name: Download IR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: driver-linux-ll
+          path: .
+
+      - name: Link stage0 Linux tiec
+        run: |
+          mkdir -p _local_only/bin
+          clang -O1 -fuse-ld=lld driver-linux.ll \
+            ../trm-lite/trm_lite_linux.a -lm -o _local_only/bin/tiec-linux
+          file _local_only/bin/tiec-linux
+
+      - name: Compile and run probes (POSIX runtime verification)
+        env:
+          TIE_TRM_LITE_LIB: ${{ github.workspace }}/../trm-lite/trm_lite_linux.a
+        run: |
+          set -e
+          T=$PWD/_local_only/bin/tiec-linux
+          $T tests/exec_probe.tie  -o _local_only/bin/exec_probe   --no-warn
+          $T tests/fsglob_probe.tie -o _local_only/bin/fsglob_probe --no-warn
+          $T tests/term_probe.tie  -o _local_only/bin/term_probe   --no-warn
+          echo "== exec_probe =="
+          _local_only/bin/exec_probe | tail -4
+          echo "== fsglob_probe =="
+          _local_only/bin/fsglob_probe | tail -2
+          echo "== term_probe =="
+          _local_only/bin/term_probe | tail -2
