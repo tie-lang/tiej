@@ -74,6 +74,8 @@ unsafe extern fn WaitForSingleObject(hHandle: i64, dwMilliseconds: u32) -> u32;
 unsafe extern fn GetExitCodeProcess(hProcess: i64, lpExitCode: ptr<u32>) -> i32;
 unsafe extern fn CloseHandle(hObject: i64) -> i32;
 unsafe extern fn GetStdHandle(nStdHandle: i32) -> ptr<u8>;
+unsafe extern fn SetEnvironmentVariableW(lpName: ptr<u8>, lpValue: ptr<u8>) -> i32;
+unsafe extern fn GetEnvironmentVariableW(lpName: ptr<u8>, lpBuffer: ptr<u8>, nSize: u32) -> u32;
 #else
 // ==================== POSIX 符号（libc） ====================
 unsafe extern fn fork() -> i32;
@@ -88,6 +90,7 @@ unsafe extern fn open(path: string, flags: i32, mode: i32) -> i32;
 unsafe extern fn close(fd: i32) -> i32;
 unsafe extern fn access(path: string, mode: i32) -> i32;
 unsafe extern fn getenv(name: string) -> ptr<u8>;
+unsafe extern fn setenv(name: string, value: string, overwrite: i32) -> i32;
 unsafe extern fn _exit(ec: i32);
 #end
 
@@ -134,7 +137,7 @@ unsafe fn wr_u64(p: ptr<u8>, off: i64, v: i64) {
 // ---- 内部：宽串/缓冲（自包含，参照 sys/win32.tie 范式） ----
 
 // tie 字符串 → alloc 的 UTF-16LE C 串（含尾双 0）。
-unsafe fn wstr(s: string) -> ptr<u8> {
+pub unsafe fn wstr(s: string) -> ptr<u8> {
     var n = str_len(s)
     var p: ptr<u8> = alloc(n * 4 + 4)
     var o: i64 = 0
@@ -694,6 +697,75 @@ unsafe fn x_spawn(words: table<string>, cwd: string, hin: i64, hout: i64, herr: 
     return (true, to_i64(pid))
 }
 #end
+
+// ==================== 进程环境（Windows 实时块；tiec 内置旧账绕行） ====================
+// 背景：tie `get_env` 内置在 Windows 读 CRT 启动快照、`set_env` 写 Win32 实时块，
+// 进程内写后不可见（tiec 待修旧账）。此处在运行时侧以成对的宽字符 API 实现
+// 实时读写（与子进程继承同源：Win32 环境块即子进程继承源）。
+
+// 读进程环境。缺失/失败 → 空串。
+pub func env_get(name: string) -> string {
+    #cfg(os=windows)
+    unsafe {
+        var nw = wstr(name)
+        var buf = alloc(65536)
+        var n = GetEnvironmentVariableW(nw, buf, to_u32(32768))
+        if n == 0 || n > 32768 {
+            return ""
+        }
+        return w16_read(buf, to_i64(n))
+    }
+    #else
+    unsafe {
+        var pp = getenv(name)
+        if ptr_to_int(pp) == 0 {
+            return ""
+        }
+        return cstr_read(pp)
+    }
+    #end
+}
+
+// 写进程环境（覆盖语义；子进程继承）。
+pub func env_put(name: string, value: string) {
+    #cfg(os=windows)
+    unsafe {
+        var nw = wstr(name)
+        var vw = wstr(value)
+        var _r = SetEnvironmentVariableW(nw, vw)
+    }
+    #else
+    unsafe {
+        var _r = setenv(name, value, to_i32(1))
+    }
+    #end
+}
+
+// UTF-16 缓冲 → tie 字符串（前 n 单元；代理对合并）。仅 win 分支用。
+func w16_read(p: ptr<u8>, n: i64) -> string {
+    unsafe {
+        var sb = string_builder()
+        var i: i64 = 0
+        while i < n {
+            var lo = to_i64(deref(ptr_add(p, i * 2)))
+            var hi = to_i64(deref(ptr_add(p, i * 2 + 1)))
+            var cp = lo | (hi << 8)
+            if cp >= 0xD800 && cp <= 0xDBFF && i + 1 < n {
+                var lo2 = to_i64(deref(ptr_add(p, (i + 1) * 2)))
+                var hi2 = to_i64(deref(ptr_add(p, (i + 1) * 2 + 1)))
+                var cp2 = lo2 | (hi2 << 8)
+                if cp2 >= 0xDC00 && cp2 <= 0xDFFF {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (cp2 - 0xDC00)
+                    i = i + 1
+                }
+            }
+            sb_append(sb, str_from_code(cp))
+            i = i + 1
+        }
+        return sb_build(sb)
+    }
+    return ""
+}
 
 // ==================== 公共组合面 ====================
 
