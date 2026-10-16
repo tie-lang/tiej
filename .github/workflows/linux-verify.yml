@@ -26,10 +26,11 @@ jobs:
           sudo apt-get install -y -qq clang lld llvm libc6-dev
           clang --version | head -1
 
-      - name: Fetch trm_lite_linux.a
+      - name: Fetch trm_lite_linux.a and the sibling tiec repo
         run: |
           git clone --depth 1 https://github.com/tie-lang/trm-lite.git ../trm-lite
           ls -la ../trm-lite/trm_lite_linux.a
+          git clone --depth 1 https://github.com/tie-lang/tiec.git ../tiec
 
       - name: Fetch Linux-target compiler IR (latest stage0 artifact)
         run: |

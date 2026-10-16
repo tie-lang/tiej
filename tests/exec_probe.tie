@@ -62,6 +62,11 @@ var BASE: string = ""
 
 func main() {
     BASE = cwd()
+    // 平台适配：findstr（Windows）/ grep（POSIX）——测试用「全行匹配器」。
+    var GREPTOOL = "findstr"
+    if get_env("OS") != "Windows_NT" {
+        GREPTOOL = "grep"
+    }
     var TIEC = BASE + "/../tiec"
     var UP2 = BASE + "/../.."
     // ---- 1. run：PATH 解析 + rc ----
@@ -85,20 +90,20 @@ func main() {
     check(r4b.rc != 0, "4.2 cwd=非仓：rc != 0（cwd 真生效）")
 
     // ---- 5. 投喂 + 中文往返 ----
-    var r5 = execrun.capture(["findstr", "."], "", "你好，世界\nsecond line\n")
+    var r5 = execrun.capture([GREPTOOL, "."], "", "你好，世界\nsecond line\n")
     check(r5.rc == 0 && has(r5.out, "你好，世界"), "5.1 中文投喂→回显（UTF-8 往返）")
 
     // ---- 6. pipe2：进程管道 + rc 传递 ----
-    var (pa, pb) = execrun.pipe2(["git", "log", "--oneline", "-5"], ["findstr", "."], TIEC)
+    var (pa, pb) = execrun.pipe2(["git", "log", "--oneline", "-5"], [GREPTOOL, "."], TIEC)
     check(pa.rc == 0 && pb.rc == 0 && len(pb.out) > 0, "6.1 pipe2 git log → findstr 有输出")
-    var (pc, pd) = execrun.pipe2(["git", "log", "--oneline", "-5"], ["findstr", "zzz_no_such"], TIEC)
+    var (pc, pd) = execrun.pipe2(["git", "log", "--oneline", "-5"], [GREPTOOL, "zzz_no_such"], TIEC)
     check(pd.rc == 1 && len(pd.out) == 0, "6.2 findstr 无匹配 rc=1（rc 传递）")
 
     // ---- 6b. 三段管道（中间段接线）----
     var t6: table<string> = []
     var t6a = mseg(["git", "log", "--oneline", "-8"], TIEC)
-    var t6b = mseg(["findstr", "."], TIEC)
-    var t6c = mseg(["findstr", "."], TIEC)
+    var t6b = mseg([GREPTOOL, "."], TIEC)
+    var t6c = mseg([GREPTOOL, "."], TIEC)
     t6c.cap_out = true
     table_push(t6, execrun.enc(t6a))
     table_push(t6, execrun.enc(t6b))
@@ -160,7 +165,7 @@ func main() {
     // 管道单元：git log -> findstr "." ; git --version
     var s8c: table<string> = []
     var g1 = mseg(["git", "log", "--oneline", "-3"], TIEC)
-    var g2 = mseg(["findstr", "."], TIEC)
+    var g2 = mseg([GREPTOOL, "."], TIEC)
     g2.cap_out = true
     table_push(s8c, execrun.enc(g1))
     table_push(s8c, execrun.enc(g2))
