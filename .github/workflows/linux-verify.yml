@@ -64,10 +64,13 @@ jobs:
           $T tests/fsglob_probe.tie -o _local_only/bin/fsglob_probe
           $T tests/term_probe.tie  -o _local_only/bin/term_probe
           echo "== exec_probe =="
-          _local_only/bin/exec_probe || true
+          _local_only/bin/exec_probe | tee /tmp/exec.out
           echo "== fsglob_probe =="
-          _local_only/bin/fsglob_probe || true
+          _local_only/bin/fsglob_probe | tee /tmp/fsglob.out
           echo "== term_probe =="
-          _local_only/bin/term_probe || true
-          echo "== summary =="
-          grep -aE "SUMMARY" /dev/null || true
+          _local_only/bin/term_probe | tee /tmp/term.out
+          echo "== summary assertions =="
+          grep -a "SUMMARY PASS=26 FAIL=0" /tmp/exec.out
+          grep -a "SUMMARY PASS=10 FAIL=0" /tmp/fsglob.out
+          grep -a "SUMMARY PASS=4 FAIL=0" /tmp/term.out
+          echo "POSIX RUNTIME VERIFICATION: ALL GREEN"

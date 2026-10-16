@@ -34,3 +34,11 @@ tiec tests/term_probe.tie -o _local_only/bin/term_probe.exe && _local_only/bin/t
 （exec 26 项：PATH/rc/cwd/中文 UTF-8 往返/管道/重定向/合流/复合链/跳过传播；
 fsglob 10 项；term 4 项（非 TTY 降级面）。）
 
+POSIX 运行级验证（CI，ubuntu-latest）：workflow `linux-verify` 取回
+`ci-linux-ir` release 资产（本机最新 stage0 tiec 生成的 Linux 目标 IR，
+刷新：`tiec compiler/driver.tie --target linux-x64 --emit-ir -o driver-linux`
+后 `gh release upload ci-linux-ir driver-linux.ll --clobber`），经零 Win32
+行为门禁与 clang/lld 链接出 tiec-linux，编译并运行三个探针并断言
+26/10/4 全绿。已知账（垫片在 `.github/ci/linux-shims.c`）：内嵌解释器
+dynload 缺 linux 分支；控制台契约 linux 分支应发 `write` 而非 `_write`。
+
