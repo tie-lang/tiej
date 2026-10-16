@@ -307,6 +307,22 @@ pub func key_read() -> i64 {
     }
 }
 
+// 当前光标列（GetConsoleScreenBufferInfo.dwCursorPosition.X；posix 返回 -1）。
+pub func cursor_col() -> i64 {
+    unsafe {
+        #cfg(os=windows)
+        var h = ptr_to_int(GetStdHandle(to_i32(-11)))
+        var csbi = alloc(22)
+        if GetConsoleScreenBufferInfo(h, csbi) == 0 {
+            return -1
+        }
+        return rd_u16(csbi, 4)
+        #else
+        return -1
+        #end
+    }
+}
+
 // 终端列数（探测失败 80）。
 pub func term_cols() -> i64 {
     unsafe {
