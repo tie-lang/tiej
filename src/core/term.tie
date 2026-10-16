@@ -307,6 +307,19 @@ pub func key_read() -> i64 {
     }
 }
 
+// stdout 是否终端（管道/重定向 ⇒ false；着色输出面的守门判据）。
+pub func out_tty() -> bool {
+    unsafe {
+        #cfg(os=windows)
+        var h = ptr_to_int(GetStdHandle(to_i32(-11)))
+        var m = alloc(4)
+        return GetConsoleMode(h, m) != 0
+        #else
+        return isatty(1) == 1
+        #end
+    }
+}
+
 // 当前光标列（GetConsoleScreenBufferInfo.dwCursorPosition.X；posix 返回 -1）。
 pub func cursor_col() -> i64 {
     unsafe {
