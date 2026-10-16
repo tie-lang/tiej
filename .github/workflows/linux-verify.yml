@@ -78,9 +78,9 @@ jobs:
         run: |
           set -e
           T=$PWD/_local_only/bin/tiec-linux
-          $T tests/exec_probe.tie  -o _local_only/bin/exec_probe   --no-warn
-          $T tests/fsglob_probe.tie -o _local_only/bin/fsglob_probe --no-warn
-          $T tests/term_probe.tie  -o _local_only/bin/term_probe   --no-warn
+          $T tests/exec_probe.tie  -o _local_only/bin/exec_probe
+          $T tests/fsglob_probe.tie -o _local_only/bin/fsglob_probe
+          $T tests/term_probe.tie  -o _local_only/bin/term_probe
           echo "== exec_probe =="
           _local_only/bin/exec_probe | tail -4
           echo "== fsglob_probe =="
